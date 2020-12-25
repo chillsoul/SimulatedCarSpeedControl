@@ -13,8 +13,9 @@ DATA SEGMENT
     LED_bit     DB  ? ;位码值缓存
     global_state DB 0 ;=0停止，1启动第一档,2第二档，3第三档
     limit       DW  0,0 ;限速设置，最低，最高
-    speed_state DB  0 ;=0最低速，<0减速，>0加速
-    abs_a       DB  0 ;=0最低速，其余值为加速度绝对值
+    speed_state DB  0 ;=0匀速，<0减速，>0加速
+    abs_a       DB  1 ;=1起始值，避免循环65536次，其余值为加速度绝对值
+    levelflag   DB  0 ;1表示刚启动
 DATA ENDS
 
 ;代码段
@@ -29,12 +30,27 @@ START: ;程序起始
 MAIN: ;主要循环
     call scan4x4Keyboard ;扫描键盘，控制状态变量
     call setSpeed
+    call lightLED
     ;检测是否退出
     MOV AH,01
     INT 16H
     CMP AL,1BH ;判断是否键入ESC
     JE EXIT
     JMP MAIN
+    ;键入ESC
+EXIT:
+    ;清空键盘缓冲区
+    MOV AH,00
+    INT 16H
+    ;内存变量全部恢复初始化
+    MOV global_state,0
+    MOV speed_state,0
+    MOV abs_a,1
+    MOV buffer_hex,0
+    call bufferSync
+    MOV AX,0
+    JMP MAIN
+    
 ;扫描键盘输入
 scan4x4Keyboard PROC
     ;寄存器保存
@@ -83,32 +99,45 @@ STEP2:
 STEP3:
     MOV DL,[DI]
     CMP DL,'1'
-    JZ  ENABLE_STATE
-ENABLE_STATE:
-    CMP [global_state],1 ;如果是第一次启动，那么把速度状态设为0表示初速度5
-    JE  SWITCHL1
-    MOV [speed_state],0
+    JZ  SWITCHL1
+    JMP NEXTCMP1
+
 SWITCHL1:
     MOV [global_state],1
     MOV limit[0],5H
-    MOV limit[1],25H
+    MOV limit[2],25H
+    CMP [buffer_hex],5H
+    JB  UP
+    CMP [buffer_hex],25H
+    JA  DOWN
     JMP endOfScan4x4Keyboard
-
+    
+NEXTCMP1:
     CMP DL,'2'
     JZ  SWITCHL2
     CMP DL,'3'
     JZ  SWITCHL3
+    JMP NEXTCMP2
 SWITCHL2:
     MOV [global_state],2 ;第二档
     MOV limit[0],25H
-    MOV limit[1],60H
+    MOV limit[2],60H
+    CMP [buffer_hex],25H
+    JB  UP
+    CMP [buffer_hex],60H
+    JA  DOWN
     JMP endOfScan4x4Keyboard
 SWITCHL3:
     MOV [global_state],3 ;第三档
     MOV limit[0],60H
-    MOV limit[1],120H
+    MOV limit[2],120H
+    CMP [buffer_hex],60H
+    JB  UP
+    JE  DOWN
+    CMP [buffer_hex],120H
+    JA  DOWN
     JMP endOfScan4x4Keyboard
-
+NEXTCMP2:
     CMP DL,'A'
     JZ  SPEEDUPL1
     CMP DL,'B'
@@ -117,23 +146,40 @@ SWITCHL3:
     JZ  SPEEDDOWNL1
     CMP DL,'D'
     JZ  SPEEDDOWNL2
+    JMP endOfScan4x4Keyboard
 SPEEDUPL1:
+    MOV [levelflag],0
     MOV [speed_state],1 ;加速
     MOV [abs_a],30 ;慢加速
     JMP endOfScan4x4Keyboard
 SPEEDUPL2:
+    MOV [levelflag],0
     MOV [speed_state],1 ;加速
     MOV [abs_a],15 ;快加速
     JMP endOfScan4x4Keyboard
 SPEEDDOWNL1:
     MOV [speed_state],-1 ;加速
     MOV [abs_a],30 ;慢刹车
+    MOV LIMIT[0],0
     JMP endOfScan4x4Keyboard
 SPEEDDOWNL2:
     MOV [speed_state],-1 ;加速
     MOV [abs_a],15 ;急刹车
+    MOV LIMIT[0],0
     JMP endOfScan4x4Keyboard
-
+    
+;换挡时动力不足或过高导致的加减速
+UP:
+    MOV [levelflag],1
+    MOV [speed_state],1 ;加速
+    MOV [abs_a],60 ;升档加速
+    JMP endOfScan4x4Keyboard
+DOWN:
+    MOV [levelflag],1
+    MOV [speed_state],-1 ;加速
+    MOV [abs_a],60 ;掉档减速
+    JMP endOfScan4x4Keyboard
+    
 endOfScan4x4Keyboard:
     ;寄存器恢复
     POP CX
@@ -172,7 +218,24 @@ LEDLOOP2:
     MOV AL,BYTE PTR [SI] ;AL为要输出的段码
     MOV DX,IO8255_A
     OUT DX,AL
-    MOV AL,LED_bit ;使对应数码管亮
+    PUSH CX
+    MOV BH,1
+    MOV CL,LED_bit
+    SHL BH,CL
+    MOV AL,BH ;使对应数码管亮
+    POP CX
+    PUSH CX
+    CMP global_state,0
+    JE SKIPSTATELED
+    MOV CH,0
+    MOV CL,global_state
+    MOV AH,100000B
+STATELED:
+    ADD AL,AH
+    SHL AH,1
+    LOOP STATELED
+SKIPSTATELED:
+    POP CX
     MOV DX,IO8255_B
     OUT DX,AL ;B口输出位码
     PUSH CX
@@ -180,8 +243,11 @@ LEDLOOP2:
 DELAY:
     LOOP DELAY ;延时
     POP CX
+    MOV AL,00H
+    OUT DX,AL 
     DEC BYTE PTR [LED_bit]
-    JNZ LEDLOOP2 ;循环复用驱动多个数码管
+    MOV BH,LED_bit
+    JNS LEDLOOP2 ;循环复用驱动多个数码管
     LOOP LEDLOOP1 ;循环延时后再增速度
     ;恢复寄存器
     POP DX
@@ -189,6 +255,7 @@ DELAY:
     POP CX
     POP BX
     POP DI
+    RET
 lightLED ENDP
 ;速度设置
 setSpeed PROC
@@ -200,26 +267,39 @@ setSpeed PROC
     JE  BASICCHECK
 BASICCHECK:
     CMP [speed_state],0
-    JE  BASICSPEED
-    JA  SETSPEEDUP
-    JB  SETSPEEDDOWN
-BASICSPEED:
-    MOV [buffer_hex],5
-    call bufferSync
-    JMP endOfSetSpeed
+    JE  SETSPEEDUP
+    JNS SETSPEEDUP
+    JS  SETSPEEDDOWN
 SETSPEEDUP:  
-    CMP AX,limit[1] ;等于最高速不加速
-    JE endOfSetSpeed
+    CMP levelflag,1
+    JE  LEVELUP
+    JMP NORMALUP
+LEVELUP:
+    CMP AX,limit[0] ;小于最低速加速
+    JAE endOfSetSpeed
+NORMALUP:
+    CMP AX,limit[2] ;大于等于最高速不加速
+    JAE endOfSetSpeed
+    CLC ;防止DAA的时候干扰
     INC AX
     DAA
     ADC AH,0
+    MOV WORD PTR [buffer_hex],AX
     call bufferSync
     JMP endOfSetSpeed
 SETSPEEDDOWN:
-    CMP AX,limit[0] ;等于最低速不减速
-    JE endOfSetSpeed
+    CMP levelflag,1
+    JE  LEVELDOWN
+    JMP NORMALDOWN
+LEVELDOWN:
+    CMP AX,limit[2] ;大于最高速减速
+    JBE endOfSetSpeed
+NORMALDOWN:
+    CMP AX,limit[0] ;小于等于最低速不减速
+    JBE endOfSetSpeed
     DEC AX
     DAS
+    MOV WORD PTR [buffer_hex],AX
     call bufferSync
     JMP endOfSetSpeed
 endOfSetSpeed:
@@ -237,6 +317,10 @@ bufferSync PROC
     MOV buffer_bin[0],DL
     MOV DL,AL
     AND DL,0F0H ;取高四位（十位）
+    PUSH CX
+    MOV CL,4
+    SHR DL,CL
+    POP CX
     MOV buffer_bin[1],DL
     MOV DL,AH
     AND DL,0FH ;取第四位（百位）
@@ -244,23 +328,8 @@ bufferSync PROC
     ;恢复寄存器
     POP DX
     POP AX
-bufferSync ENDP
-;键入ESC
-EXIT PROC
-    MOV DX,IO8255_A
-    MOV AL,0 ;数码管显示0
-    OUT DX,AL
-    ;内存变量全部恢复初始化
-    MOV [global_state],0
-    MOV [speed_state],0
-    MOV [abs_a],0
-    MOV buffer_bin[0],0
-    MOV buffer_bin[1],0
-    MOV buffer_bin[2],0
-    MOV [buffer_hex],0
-    MOV [LED_bit],2
     RET
-EXIT ENDP
+bufferSync ENDP
 
 CODE ENDS
     END START
