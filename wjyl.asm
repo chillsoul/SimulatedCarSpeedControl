@@ -100,7 +100,18 @@ STEP3:
     MOV DL,[DI]
     CMP DL,'1'
     JZ  SWITCHL1
+    JMP NEXTCMP0
+    
+NEXTCMP0:
+    CMP DL,'0'
+    JZ  SWITCHL0
     JMP NEXTCMP1
+
+SWITCHL0:
+    ;MOV [global_state],1
+    MOV [speed_state],0
+    JMP endOfScan4x4Keyboard
+
 
 SWITCHL1:
     MOV [global_state],1
@@ -267,9 +278,11 @@ setSpeed PROC
     JE  BASICCHECK
 BASICCHECK:
     CMP [speed_state],0
-    JE  SETSPEEDUP
+    JE  STATICSPEED
     JNS SETSPEEDUP
     JS  SETSPEEDDOWN
+STATICSPEED:
+    JAE endOfSetSpeed
 SETSPEEDUP:  
     CMP levelflag,1
     JE  LEVELUP
